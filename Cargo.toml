@@ -1,0 +1,13 @@
+[package]
+name = "ops"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aws-config = "1"
+aws-sdk-ssm = "1"
+tokio = { version = "1", features = ["full"] }
+walkdir = "2"
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+anyhow = "1.0.98"
