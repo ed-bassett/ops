@@ -33,7 +33,7 @@ enum Command {
     prefix: String,
 
     #[arg(long)]
-    output_dir: PathBuf,
+    dir: PathBuf,
   },
 }
 
@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
 
   match cli.command {
     Command::Upload { dir, prefix } => upload_dir(&client, dir, prefix).await?,
-    Command::Download { prefix, output_dir } => download_to_dir(&client, prefix, output_dir).await?,
+    Command::Download { prefix, dir } => download_to_dir(&client, prefix, dir).await?,
   }
 
   Ok(())
@@ -66,7 +66,7 @@ async fn upload_dir(client: &Client, dir: PathBuf, prefix: String) -> anyhow::Re
           .name(&key)
           .value(String::from_utf8_lossy(chunk))
           .overwrite(true)
-          .r#type(ParameterType::String)
+          .r#type(ParameterType::SecureString)
           .send()
           .await?;
       }
@@ -76,7 +76,7 @@ async fn upload_dir(client: &Client, dir: PathBuf, prefix: String) -> anyhow::Re
         .name(&param_base)
         .value(String::from_utf8_lossy(&content))
         .overwrite(true)
-        .r#type(ParameterType::String)
+        .r#type(ParameterType::SecureString)
         .send()
         .await?;
     }
@@ -122,7 +122,7 @@ async fn download_to_dir(client: &Client, prefix: String, output_dir: PathBuf) -
     chunks.sort_by_key(|(i, _)| *i);
     let content: String = chunks.into_iter().map(|(_, c)| c).collect();
 
-    let full_path = dbg!(output_dir.join(rel_path));
+    let full_path = output_dir.join(rel_path);
     if let Some(parent) = full_path.parent() {
       fs::create_dir_all(parent)?;
     }
