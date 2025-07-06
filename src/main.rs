@@ -4,6 +4,7 @@ use std::{
   path::{Path, PathBuf},
 };
 
+use anyhow::{Context, Result};
 use aws_config::BehaviorVersion;
 use aws_sdk_ssm::{Client, types::ParameterType};
 use clap::{Parser, Subcommand};
@@ -35,6 +36,14 @@ enum Command {
     #[arg(long)]
     dir: PathBuf,
   },
+  Env {
+    #[arg(long, short, env)]
+    file: String,
+    #[arg(long, short, env)]
+    base: String,
+    #[arg(long, short, env, value_delimiter = ',')]
+    vars: Vec<String>,
+  },
 }
 
 #[tokio::main]
@@ -46,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
   match cli.command {
     Command::Upload { dir, prefix } => upload_dir(&client, dir, prefix).await?,
     Command::Download { prefix, dir } => download_to_dir(&client, prefix, dir).await?,
+    Command::Env{ file, base, vars } => set_env(&client, file, base, vars).await?
   }
 
   Ok(())
@@ -139,4 +149,27 @@ fn to_ssm_key(path: &Path) -> String {
     key.push_str(&comp.as_os_str().to_string_lossy());
   }
   key
+}
+
+pub async fn set_env(client: &Client, file: String, base: String, vars: Vec<String>) -> Result<()> {
+  let resp = client
+    .get_parameters()
+    .set_names(Some(vars.iter().map(|v| format!("{base}/{v}")).collect()))
+    .with_decryption(true)
+    .send()
+    .await
+    .context("Failed to fetch parameters from SSM")?;
+
+  let output = resp.parameters().iter().map(|p| {
+    let name = p.name().unwrap_or_default();
+    let value = p.value().unwrap_or_default();
+
+    let key = name.rsplit('/').next().unwrap_or(&name).to_ascii_uppercase();
+
+    format!("{key}=\"{value}\"")
+  }).collect::<Vec<_>>().join("\n");
+
+  fs::write(&file, output).context(format!("Failed to write to {file}"))?;
+
+  Ok(())
 }
