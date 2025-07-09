@@ -30,8 +30,10 @@ enum Command {
     prefix: String,
   },
   Download {
-    #[arg(long)]
-    prefix: String,
+    #[arg(long, conflicts_with("name"), required_unless_present("name"))]
+    prefix: Option<String>,
+    #[arg(long, conflicts_with("prefix"), required_unless_present("prefix"))]
+    name: Option<String>,
 
     #[arg(long)]
     dir: PathBuf,
@@ -54,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
 
   match cli.command {
     Command::Upload { dir, prefix } => upload_dir(&client, dir, prefix).await?,
-    Command::Download { prefix, dir } => download_to_dir(&client, prefix, dir).await?,
+    Command::Download { prefix, dir, name } => download_to_dir(&client, prefix, name, dir).await?,
     Command::Env{ file, base, vars } => set_env(&client, file, base, vars).await?
   }
 
@@ -94,39 +96,48 @@ async fn upload_dir(client: &Client, dir: PathBuf, prefix: String) -> anyhow::Re
   Ok(())
 }
 
-async fn download_to_dir(client: &Client, prefix: String, output_dir: PathBuf) -> anyhow::Result<()> {
-  let mut next_token = None;
-  let mut parameters: HashMap<String, Vec<(usize, String)>> = HashMap::new();
+async fn download_to_dir(client: &Client, prefix: Option<String>, name: Option<String>, output_dir: PathBuf) -> anyhow::Result<()> {
+  let parameters = match (prefix, name) {
+    (Some(prefix), _) => { 
+      let mut next_token = None;
+      let mut parameters: HashMap<String, Vec<(usize, String)>> = HashMap::new();
+      loop {
+        let resp = client
+          .get_parameters_by_path()
+          .with_decryption(true)
+          .path(&prefix)
+          .set_next_token(next_token)
+          .recursive(true)
+          .send()
+          .await?;
 
-  loop {
-    let resp = client
-      .get_parameters_by_path()
-      .with_decryption(true)
-      .path(&prefix)
-      .set_next_token(next_token)
-      .recursive(true)
-      .send()
-      .await?;
+        for param in dbg!(resp.parameters()) {
+          let name = param.name().unwrap().to_string();
+          let rel_path = name.trim_start_matches(&format!("{prefix}/"));
+          let content = param.value().unwrap().to_string();
 
-    for param in resp.parameters() {
-      let name = param.name().unwrap().to_string();
-      let rel_path = name.trim_start_matches(&format!("{prefix}/"));
-      let content = param.value().unwrap().to_string();
+          if let Some((base, part)) = rel_path.rsplit_once(".part") {
+            let idx: usize = part.parse()?;
+            parameters.entry(base.to_string()).or_default().push((idx, content));
+          } else {
+            parameters.entry(rel_path.to_string()).or_default().push((0, content));
+          }
+        }
 
-      if let Some((base, part)) = rel_path.rsplit_once(".part") {
-        let idx: usize = part.parse()?;
-        parameters.entry(base.to_string()).or_default().push((idx, content));
-      } else {
-        parameters.entry(rel_path.to_string()).or_default().push((0, content));
-      }
-    }
-
-    if let Some(token) = resp.next_token() {
-      next_token = Some(token.to_string());
-    } else {
-      break;
-    }
-  }
+        if let Some(token) = resp.next_token() {
+          next_token = Some(token.to_string());
+        } else {
+          break;
+        }
+      } 
+      parameters
+    },
+    (_, Some(name)) => {
+      let resp = client.get_parameter().name(name).with_decryption(true).send().await?;
+      resp.parameter().into_iter().map(|p| (p.name().unwrap().rsplit('/').nth(0).unwrap().to_string(), p.value().into_iter().map(|v|(0, v.to_string())).collect())).collect()
+    },
+    _ => { [].into() }
+  };
 
   for (rel_path, mut chunks) in parameters {
     chunks.sort_by_key(|(i, _)| *i);
@@ -152,6 +163,7 @@ fn to_ssm_key(path: &Path) -> String {
 }
 
 pub async fn set_env(client: &Client, file: String, base: String, vars: Vec<String>) -> Result<()> {
+  println!("Getting vars {vars:?} from {base}");
   let resp = client
     .get_parameters()
     .set_names(Some(vars.iter().map(|v| format!("{base}/{v}")).collect()))
@@ -169,6 +181,7 @@ pub async fn set_env(client: &Client, file: String, base: String, vars: Vec<Stri
     format!("{key}=\"{value}\"")
   }).collect::<Vec<_>>().join("\n");
 
+  println!("Writing to file {file}");
   fs::write(&file, output).context(format!("Failed to write to {file}"))?;
 
   Ok(())

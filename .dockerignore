@@ -1,0 +1,12 @@
+.git
+.gitignore
+data
+target
+Dockerfile
+.dockerignore
+compose.yml
+.*.sw?
+data
+.env
+ops
+docs
