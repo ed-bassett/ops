@@ -12,3 +12,5 @@ clap = { version = "4", features = ["derive", "env"] }
 futures = "0.3"
 anyhow = "1.0.98"
 tempdir = "0.3.7"
+serde_yaml = "0.9.34"
+serde = "1.0.219"

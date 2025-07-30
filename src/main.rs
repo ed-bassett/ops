@@ -38,6 +38,12 @@ enum Command {
     #[arg(long)]
     dir: PathBuf,
   },
+  Copy {
+    #[arg(long)]
+    prefix: String,
+    #[arg(long)]
+    to_prefix: String,
+  },
   Env {
     #[arg(long, short, env)]
     file: String,
@@ -57,7 +63,8 @@ async fn main() -> anyhow::Result<()> {
   match cli.command {
     Command::Upload { dir, prefix } => upload_dir(&client, dir, prefix).await?,
     Command::Download { prefix, dir, name } => download_to_dir(&client, prefix, name, dir).await?,
-    Command::Env{ file, base, vars } => set_env(&client, file, base, vars).await?
+    Command::Env{ file, base, vars } => set_env(&client, file, base, vars).await?,
+    Command::Copy { prefix, to_prefix } => copy(&client, prefix, to_prefix).await?,
   }
 
   Ok(())
@@ -96,40 +103,42 @@ async fn upload_dir(client: &Client, dir: PathBuf, prefix: String) -> anyhow::Re
   Ok(())
 }
 
+fn all_parameters_by_path(client: &Client, prefix: &str) -> impl futures::stream::Stream<Item = Result<Vec<aws_sdk_ssm::types::Parameter>>> {
+  stream::try_unfold((true, None), move |(first, next_token)| async move {
+    if first || next_token.is_some() {
+      let resp = client
+        .get_parameters_by_path()
+        .with_decryption(true)
+        .path(prefix)
+        .set_next_token(next_token)
+        .recursive(true)
+        .send()
+        .await?;
+      Ok(Some((resp.parameters().to_vec(), (false, resp.next_token().map(|s| s.to_string())))))
+    } else {
+      Ok(None)
+    }
+  })
+}
+use futures::stream::{self, TryStreamExt};
 async fn download_to_dir(client: &Client, prefix: Option<String>, name: Option<String>, output_dir: PathBuf) -> anyhow::Result<()> {
   let parameters = match (prefix, name) {
     (Some(prefix), _) => { 
-      let mut next_token = None;
+      let params = all_parameters_by_path(client, &prefix).try_collect::<Vec<_>>().await?.into_iter().flatten();
+
       let mut parameters: HashMap<String, Vec<(usize, String)>> = HashMap::new();
-      loop {
-        let resp = client
-          .get_parameters_by_path()
-          .with_decryption(true)
-          .path(&prefix)
-          .set_next_token(next_token)
-          .recursive(true)
-          .send()
-          .await?;
+      for param in params {
+        let name = param.name().unwrap().to_string();
+        let rel_path = name.trim_start_matches(&format!("{prefix}/"));
+        let content = param.value().unwrap().to_string();
 
-        for param in dbg!(resp.parameters()) {
-          let name = param.name().unwrap().to_string();
-          let rel_path = name.trim_start_matches(&format!("{prefix}/"));
-          let content = param.value().unwrap().to_string();
-
-          if let Some((base, part)) = rel_path.rsplit_once(".part") {
-            let idx: usize = part.parse()?;
-            parameters.entry(base.to_string()).or_default().push((idx, content));
-          } else {
-            parameters.entry(rel_path.to_string()).or_default().push((0, content));
-          }
-        }
-
-        if let Some(token) = resp.next_token() {
-          next_token = Some(token.to_string());
+        if let Some((base, part)) = rel_path.rsplit_once(".part") {
+          let idx: usize = part.parse()?;
+          parameters.entry(base.to_string()).or_default().push((idx, content));
         } else {
-          break;
+          parameters.entry(rel_path.to_string()).or_default().push((0, content));
         }
-      } 
+      }
       parameters
     },
     (_, Some(name)) => {
@@ -183,6 +192,28 @@ pub async fn set_env(client: &Client, file: String, base: String, vars: Vec<Stri
 
   println!("Writing to file {file}");
   fs::write(&file, output).context(format!("Failed to write to {file}"))?;
+
+  Ok(())
+}
+
+pub async fn copy(client: &Client, prefix: String, to_prefix: String) -> Result<()> {
+  let params = all_parameters_by_path(client, &prefix).try_collect::<Vec<_>>().await?;
+
+  for param in params.into_iter().flatten() {
+    let name = param.name().unwrap();
+    let value = param.value().unwrap();
+
+    let new_name = format!("{}{}", to_prefix, name.trim_start_matches(&prefix));
+
+    client
+      .put_parameter()
+      .name(new_name)
+      .value(value)
+      .overwrite(true)
+      .r#type(param.r#type().unwrap().clone())
+      .send()
+      .await?;
+  }
 
   Ok(())
 }
