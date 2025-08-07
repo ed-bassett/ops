@@ -14,17 +14,18 @@ ENV PATH="/opt/zig:$PATH"
 # Install cargo-zigbuild
 RUN cargo install cargo-zigbuild
 
+# Add the target
+RUN rustup target add aarch64-unknown-linux-musl
+
 # Create app dir
 WORKDIR /app
 
 # Copy only Cargo.toml and Cargo.lock to leverage Docker layer caching
 COPY Cargo.toml Cargo.lock ./
+RUN sed -i '/^version *= *".*"/d' Cargo.toml
 
 # Pre-create a dummy src/lib.rs so build doesn't fail
 RUN mkdir src && echo "fn main() {}" > src/main.rs
-
-# Add the target
-RUN rustup target add aarch64-unknown-linux-musl
 
 # Build dependencies only — this will be cached unless Cargo.toml/lock changes
 RUN cargo zigbuild --release --target aarch64-unknown-linux-musl || true

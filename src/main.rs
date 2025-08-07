@@ -5,11 +5,14 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use aws_config::BehaviorVersion;
 use aws_sdk_ssm::{Client, types::ParameterType};
 use clap::{Parser, Subcommand};
 use tokio::fs as tokio_fs;
 use walkdir::WalkDir;
+use futures::TryStreamExt;
+
+mod compose;
+mod ssm;
 
 const CHUNK_SIZE: usize = 4096;
 
@@ -20,7 +23,7 @@ struct Cli {
   command: Command,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Command {
   Upload {
     #[arg(long)]
@@ -52,19 +55,28 @@ enum Command {
     #[arg(long, short, env, value_delimiter = ',')]
     vars: Vec<String>,
   },
+  Compose {
+    #[arg(long, short)]
+    file: String,
+    #[arg(long, short)]
+    namespace: String,
+    #[arg(trailing_var_arg = true)]
+    args: Vec<String>,
+  }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
   let cli = Cli::parse();
-  let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
-  let client = Client::new(&config);
+  let client = ssm::client().await;
+  dbg!(&cli.command);
 
   match cli.command {
     Command::Upload { dir, prefix } => upload_dir(&client, dir, prefix).await?,
     Command::Download { prefix, dir, name } => download_to_dir(&client, prefix, name, dir).await?,
     Command::Env{ file, base, vars } => set_env(&client, file, base, vars).await?,
     Command::Copy { prefix, to_prefix } => copy(&client, prefix, to_prefix).await?,
+    Command::Compose { file, namespace, args } => compose::exec_compose(&client, &file, &namespace, args).await?,
   }
 
   Ok(())
@@ -103,28 +115,10 @@ async fn upload_dir(client: &Client, dir: PathBuf, prefix: String) -> anyhow::Re
   Ok(())
 }
 
-fn all_parameters_by_path(client: &Client, prefix: &str) -> impl futures::stream::Stream<Item = Result<Vec<aws_sdk_ssm::types::Parameter>>> {
-  stream::try_unfold((true, None), move |(first, next_token)| async move {
-    if first || next_token.is_some() {
-      let resp = client
-        .get_parameters_by_path()
-        .with_decryption(true)
-        .path(prefix)
-        .set_next_token(next_token)
-        .recursive(true)
-        .send()
-        .await?;
-      Ok(Some((resp.parameters().to_vec(), (false, resp.next_token().map(|s| s.to_string())))))
-    } else {
-      Ok(None)
-    }
-  })
-}
-use futures::stream::{self, TryStreamExt};
 async fn download_to_dir(client: &Client, prefix: Option<String>, name: Option<String>, output_dir: PathBuf) -> anyhow::Result<()> {
   let parameters = match (prefix, name) {
     (Some(prefix), _) => { 
-      let params = all_parameters_by_path(client, &prefix).try_collect::<Vec<_>>().await?.into_iter().flatten();
+      let params = ssm::all_parameters_by_path(client, &prefix).try_collect::<Vec<_>>().await?.into_iter().flatten();
 
       let mut parameters: HashMap<String, Vec<(usize, String)>> = HashMap::new();
       for param in params {
@@ -197,7 +191,7 @@ pub async fn set_env(client: &Client, file: String, base: String, vars: Vec<Stri
 }
 
 pub async fn copy(client: &Client, prefix: String, to_prefix: String) -> Result<()> {
-  let params = all_parameters_by_path(client, &prefix).try_collect::<Vec<_>>().await?;
+  let params = ssm::all_parameters_by_path(client, &prefix).try_collect::<Vec<_>>().await?;
 
   for param in params.into_iter().flatten() {
     let name = param.name().unwrap();
